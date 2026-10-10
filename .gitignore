@@ -1,0 +1,15 @@
+node_modules/
+__pycache__/
+.venv/
+.env
+.env.*
+*.log
+*.pem
+*.key
+dist/
+coverage/
+# Machine-local acceptance scripts are retained locally, not published.
+test/live.ts
+test/documents-live.ts
+test/downloads-live.ts
+test/verify_documents_live.py

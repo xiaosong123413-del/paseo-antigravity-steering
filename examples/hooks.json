@@ -1,0 +1,18 @@
+{
+  "paseo-antigravity-steering": {
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "\"/absolute/path/to/node\" \"/absolute/path/to/paseo-antigravity-steering/server/hook-client.cjs\" pre",
+        "timeout": 5
+      }
+    ],
+    "PostInvocation": [
+      {
+        "type": "command",
+        "command": "\"/absolute/path/to/node\" \"/absolute/path/to/paseo-antigravity-steering/server/hook-client.cjs\" post",
+        "timeout": 5
+      }
+    ]
+  }
+}

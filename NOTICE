@@ -1,0 +1,17 @@
+Antigravity Steering for Paseo
+
+This project includes code from Paseo 0.11.1's Antigravity provider.
+Copyright (c) 2025-present Mohamed Boudra
+https://github.com/getpaseo/paseo
+Licensed under the Apache License, Version 2.0; see LICENSE.
+
+Changes include a separate provider identity, invocation-hook steering,
+document upload handling, copy-first document editing, and tests.
+
+Third-party dependencies retain their own licenses. In particular, PyMuPDF
+is offered under the GNU AGPL v3 or an Artifex commercial license. It is
+installed separately; it is not relicensed under this project's license.
+https://pymupdf.readthedocs.io/en/latest/about.html#license-and-copyright
+
+This is an independent community plugin, not an official Google or Paseo
+release. Product names and marks belong to their respective owners.

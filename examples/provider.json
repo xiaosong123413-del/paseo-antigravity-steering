@@ -1,0 +1,16 @@
+{
+  "agents": {
+    "providers": {
+      "antigravity-steering": {
+        "enabled": true,
+        "command": ["/absolute/path/to/agy"],
+        "env": {
+          "PASEO_DOCUMENT_PYTHON": "/absolute/path/to/python",
+          "PASEO_DOCUMENT_HELPER": "/absolute/path/to/paseo-antigravity-steering/server/document_io.py",
+          "PASEO_DOCUMENT_OUTPUT": "/absolute/path/to/document-outputs",
+          "PASEO_DOCUMENT_TEMP": "/absolute/path/to/temporary-files"
+        }
+      }
+    }
+  }
+}
