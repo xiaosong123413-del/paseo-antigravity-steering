@@ -13,10 +13,13 @@ import type {
   ProviderUsage,
 } from "@getpaseo/plugin/server/provider";
 import { startDriver, selection, type Driver } from "./process.js";
+import { accountEnvironment, afterQuotaExhausted, isQuotaFailure, preferredAccount, switchAccount, type AgAccount } from "./accounts.js";
 import { validateSelection } from "./catalog.js";
 import { PromptFiles } from "./prompt.js";
 import { SteeringBridge } from "./steering.js";
 import { toolItem } from "./timeline.js";
+import { recoverAntigravityMessages } from "./history.js";
+import { evidenceEnvelope, runLifecycle, LIFECYCLE_ENABLED } from "./lifecycle.js";
 import { AntigravityError, diagnostic, type Frame, type Step } from "./wire.js";
 
 const persistenceSchema = z
@@ -24,6 +27,7 @@ const persistenceSchema = z
   .strict();
 interface Turn {
   id: string;
+  input: string;
   text: Map<number, string>;
   usageSteps: Set<number>;
   tools: Map<string, Extract<ProviderTimelineItem, { type: "tool_call" }>>;
@@ -42,17 +46,27 @@ interface SessionOptions {
   launch: ProviderLaunch;
   catalog(): ProviderCatalog;
   persistence?: ProviderPersistence;
+  history: "replay" | "skip";
   emit(event: ProviderEvent): void;
 }
 
 export class Session {
   private state: State = { type: "dormant" };
+  private account: AgAccount = "A";
+  private pendingAccount: AgAccount | null = null;
   private config: ProviderSessionConfig;
   private conversationId: string | null;
   private firstMessage: boolean;
   private readonly promptFiles: PromptFiles;
   private readonly steering = new SteeringBridge();
   private readonly reportedDenials = new Map<string, number>();
+  private startupContext = "";
+  private startupPending = true;
+  private readonly observedSubagents = new Set<string>();
+  private readonly stoppedTurnIds = new Set<string>();
+  private lifecycleEnabled(): boolean {
+    return LIFECYCLE_ENABLED || this.config.env?.PASEO_AI_CONTEXT_LIFECYCLE === "1";
+  }
 
   constructor(private readonly options: SessionOptions) {
     this.config = { ...options.config, mode: options.config.mode ?? "full-access" };
@@ -65,7 +79,22 @@ export class Session {
   }
 
   async open(requestId: string, capabilities: readonly string[]): Promise<void> {
-    await this.ensureDriver();
+    // Paseo requests replay separately from ordinary interactive startup.
+    // History-only resume must not spawn agy or run slow source-preflight hooks.
+    const replay = this.options.history === "replay" && this.conversationId !== null;
+    if (!replay) await this.ensureDriver();
+    if (replay) this.account = preferredAccount(this.config.model);
+    if (!replay && this.lifecycleEnabled()) {
+      try {
+        const context = await runLifecycle("start", this.options.id, "", "", {force: this.lifecycleEnabled()});
+        this.startupContext = context?.context ?? "";
+      } catch {
+        this.emit({type:"session.notice",sessionId:this.options.id,notice:{
+          id:this.options.id+":memory-startup-unavailable",severity:"warning",
+          title:"Nowledge startup context unavailable",
+          description:"Source-dependent tasks still require per-prompt evidence."}});
+      }
+    }
     this.emit({
       type: "session.opened",
       requestId,
@@ -76,7 +105,29 @@ export class Session {
       cwd: this.config.cwd,
       title: this.config.title,
     });
+    if (replay && this.conversationId !== null) {
+      try {
+        const restored = await recoverAntigravityMessages(this.conversationId);
+        for (const item of restored) this.item(item);
+        if (restored.length > 0) this.emit({ type: "session.notice", sessionId: this.options.id, notice: {
+          id: this.options.id + ":history-restored", severity: "info",
+          title: "Antigravity history restored",
+          description: String(restored.length) + " user and assistant messages recovered from the native conversation database.",
+        } });
+      } catch (error) {
+        this.emit({ type: "session.notice", sessionId: this.options.id, notice: {
+          id: this.options.id + ":history-recovery-error", severity: "warning",
+          title: "Native Antigravity history recovery failed",
+          description: error instanceof Error ? error.message : String(error),
+        } });
+      }
+    }
     this.publishFullAccessNotice();
+    this.emit({ type: "session.notice", sessionId: this.options.id, notice: {
+      id: this.options.id + ":account", severity: "info",
+      title: "Gemini account " + this.account,
+      description: "aswap slot " + (this.account === "A" ? "1" : "2") + " (Windows shared login).",
+    } });
     this.publishConfig();
     this.emit({ type: "session.commands", sessionId: this.options.id, commands: [] });
     this.emit({ type: "session.ready", requestId, sessionId: this.options.id });
@@ -85,9 +136,10 @@ export class Session {
   async prompt(prompt: ProviderPrompt): Promise<void> {
     if (prompt.delivery === "steer") {
       const { text, nativeText } = await this.promptFiles.encode(prompt);
+      const enhanced = await this.preparePrompt(nativeText, prompt.clientMessageId, false);
       if (this.state.type !== "running")
         throw new AntigravityError("Steering requires an active turn", "TURN_NOT_ACTIVE");
-      this.steering.enqueue(nativeText);
+      this.steering.enqueue(enhanced);
       this.emit({
         type: "session.prompt_result",
         sessionId: this.options.id,
@@ -103,11 +155,13 @@ export class Session {
         "TURN_ACTIVE",
       );
     const { text, nativeText } = await this.promptFiles.encode(prompt);
+    const enhanced = await this.preparePrompt(nativeText, prompt.clientMessageId, true);
     await this.ensureDriver();
     if (this.state.type !== "idle") throw new AntigravityError("Antigravity session is not ready");
     const driver = this.state.driver;
     const turn: Turn = {
       id: randomUUID(),
+      input: enhanced,
       text: new Map(),
       usageSteps: new Set(),
       tools: new Map(),
@@ -135,16 +189,45 @@ export class Session {
     });
     const driverText =
       this.firstMessage && this.config.systemPrompt
-        ? `${this.config.systemPrompt}\n\n${nativeText}`
-        : nativeText;
+        ? `${this.config.systemPrompt}\n\n${enhanced}`
+        : enhanced;
     try {
       await driver.prompt(driverText);
       this.firstMessage = false;
+      this.startupPending = false;
     } catch (error) {
       if (!(error instanceof Error)) throw error;
       this.failTurn(new AntigravityError(error.message));
       await driver.stop("interrupt");
     }
+  }
+
+  private recordStop(turnId: string, reason: "completed" | "failed" | "canceled"): void {
+    if (!this.lifecycleEnabled() || this.stoppedTurnIds.has(turnId)) return;
+    this.stoppedTurnIds.add(turnId);
+    const payload = JSON.stringify({native_conversation_id: this.conversationId, reason});
+    // Nonblocking for Paseo; Nowledge imports its native Antigravity transcript with
+    // session-id based reconciliation. A failed save is logged, never reported as success.
+    void runLifecycle("stop", this.options.id, turnId, payload, {
+      force: true, timeoutMs: 85_000
+    }).catch(() => undefined);
+  }
+
+  private async preparePrompt(nativeText: string, promptId: string, withStartup: boolean): Promise<string> {
+    if (!this.lifecycleEnabled()) return nativeText;
+    let checked;
+    try {
+      checked = await runLifecycle("prompt", this.options.id, promptId, nativeText, {force: this.lifecycleEnabled()});
+    } catch {
+      throw new AntigravityError("AI Context source preflight unavailable; no task submitted",
+        "AI_CONTEXT_PREFLIGHT_UNAVAILABLE");
+    }
+    if (checked?.blocked) {
+      throw new AntigravityError("Required source evidence missing; no task submitted",
+        "AI_CONTEXT_REQUIRED_SOURCE_MISSING");
+    }
+    const initial = withStartup && this.startupPending ? this.startupContext : "";
+    return evidenceEnvelope([initial, checked?.context || ""].filter(Boolean).join("\n\n"), nativeText);
   }
 
   configure(changes: ProviderConfigChanges): void {
@@ -171,6 +254,7 @@ export class Session {
     this.state = { type: "stopping", driver };
     await driver.stop("interrupt");
     this.finishTools(turn, "canceled");
+    this.recordStop(turn.id, "canceled");
     this.emit({
       type: "session.turn",
       sessionId: this.options.id,
@@ -192,6 +276,7 @@ export class Session {
     }
     if (state.type === "running") {
       this.finishTools(state.turn, "canceled");
+      this.recordStop(state.turn.id, "canceled");
       this.emit({
         type: "session.turn",
         sessionId: this.options.id,
@@ -229,12 +314,17 @@ export class Session {
     }
     if (this.state.type !== "dormant") return;
     this.reportedDenials.clear();
+    if (this.pendingAccount !== null) {
+      await switchAccount(this.pendingAccount);
+      this.pendingAccount = null;
+    }
     const steeringUrl = await this.steering.start();
+    this.account = preferredAccount(this.config.model);
     const driver = startDriver({
       launch: this.options.launch,
       config: {
         ...this.config,
-        env: { ...this.config.env, PASEO_AGY_STEERING_URL: steeringUrl },
+        env: { ...this.config.env, PASEO_AGY_STEERING_URL: steeringUrl, ...accountEnvironment(this.account) },
       },
       conversationId: this.conversationId,
       onFrame: (frame) => this.accept(frame),
@@ -287,8 +377,44 @@ export class Session {
       });
     }
     if (result.status === "ERROR") {
+      if (isQuotaFailure(result.error)) {
+        const next = afterQuotaExhausted(this.account, this.config.model);
+        if (next) {
+          this.pendingAccount = next;
+          const safeRetry = turn.tools.size === 0 && turn.text.size === 0;
+          this.emit({ type: "session.notice", sessionId: this.options.id, notice: {
+            id: turn.id + ":quota-switch", severity: "warning",
+            title: "Antigravity account " + this.account + " reached its quota",
+            description: safeRetry
+              ? "Switching to account " + next + " and retrying this turn."
+              : "Next turn will use account " + next + "; this turn cannot be replayed safely.",
+          } });
+          if (safeRetry) {
+            this.state = { type: "stopping", driver };
+            void (async () => {
+              await driver.stop("interrupt");
+              if (this.state.type !== "stopping" || this.state.driver !== driver) return;
+              this.state = { type: "dormant" };
+              await this.ensureDriver();
+              const activeState = this.state as State;
+              if (activeState.type !== "idle") throw new AntigravityError("Account fallback not ready");
+              const replacement = activeState.driver;
+              this.state = { type: "running", driver: replacement, turn };
+              await replacement.prompt(turn.input);
+            })().catch((error: unknown) => {
+              const message = error instanceof Error ? error.message : String(error);
+              this.finishTools(turn, "failed");
+              this.recordStop(turn.id, "failed");
+              this.emit({ type: "session.turn", sessionId: this.options.id, turnId: turn.id,
+                state: "failed", error: { message: "Account fallback failed: " + message } });
+            });
+            return;
+          }
+        }
+      }
       const canceled = result.error === "interrupted";
       this.finishTools(turn, canceled ? "canceled" : "failed");
+      this.recordStop(turn.id, canceled ? "canceled" : "failed");
       this.retire(driver);
       this.emit({
         type: "session.turn",
@@ -308,6 +434,7 @@ export class Session {
       }
       this.steering.endTurn();
       this.finishTools(turn, "completed");
+      this.recordStop(turn.id, "completed");
       this.state = { type: "idle", driver };
       this.emit({
         type: "session.turn",
@@ -320,6 +447,11 @@ export class Session {
 
   private acceptStep(step: Step, turn: Turn): void {
     const id = `${turn.id}:${step.step_index}`;
+    if (step.step_type === "subagent" && !this.observedSubagents.has(id)) {
+      this.observedSubagents.add(id);
+      // The native child has already started. This is an audit, NOT a pre-start hook.
+      void runLifecycle("subagent", this.options.id, turn.id, "", {force: this.lifecycleEnabled()}).catch(() => undefined);
+    }
     if (step.step_type === "agent_response") {
       const previous = turn.text.get(step.step_index) || "";
       const text = previous + step.text_delta;
@@ -350,6 +482,7 @@ export class Session {
     this.retire(state.driver);
     if (state.type === "running") {
       this.finishTools(state.turn, "failed");
+      this.recordStop(state.turn.id, "failed");
       this.emit({
         type: "session.turn",
         sessionId: this.options.id,

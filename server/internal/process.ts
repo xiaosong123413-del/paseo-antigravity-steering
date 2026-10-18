@@ -1,6 +1,7 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { spawnProcess } from "@getpaseo/plugin/server";
 import { signalProcess } from "./signals.js";
+import { agyEnvironment } from "./proxy.js";
 import { createInterface } from "node:readline";
 import type { ProviderLaunch, ProviderSessionConfig } from "@getpaseo/plugin/server/provider";
 import {
@@ -52,7 +53,7 @@ function driverArgs(options: DriverOptions): string[] {
 export function startDriver(options: DriverOptions): Driver {
   const child = spawnProcess(options.launch.command, driverArgs(options), {
     cwd: options.config.cwd,
-    env: { ...options.launch.env, ...options.config.env },
+    env: agyEnvironment({ ...options.launch.env, ...options.config.env }),
     detached: process.platform !== "win32",
     stdio: "pipe",
   });
@@ -185,7 +186,7 @@ interface ProbeOptions {
 export function probe(options: ProbeOptions): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawnProcess(options.launch.command, [...options.launch.args, ...options.args], {
-      env: options.launch.env,
+      env: agyEnvironment(options.launch.env),
       cwd: options.cwd,
       stdio: "pipe",
       detached: process.platform !== "win32",
@@ -198,7 +199,7 @@ export function probe(options: ProbeOptions): Promise<string> {
         reject(new AntigravityError("Antigravity discovery timed out", "PROBE_TIMEOUT"));
         return undefined;
       }, reject);
-    }, 10_000);
+    }, 120_000);
     child.stdout.on("data", (chunk: Buffer) => {
       stdout += chunk.toString();
     });

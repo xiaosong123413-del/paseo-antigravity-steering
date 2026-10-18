@@ -13,3 +13,20 @@ test/live.ts
 test/documents-live.ts
 test/downloads-live.ts
 test/verify_documents_live.py
+
+
+# Never commit Google OAuth material or native Antigravity session data
+**/.aswap-runtime/
+**/.paseo-agy-account-ready
+**/*credential*
+**/*token*.json
+**/conversations/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.jsonl
+*.bak
+**/.gemini/
+**/antigravity-swap/

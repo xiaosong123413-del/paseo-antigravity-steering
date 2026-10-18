@@ -133,3 +133,18 @@ All five local source files and daemon upload copies were byte-identical before 
 The CLI transport, catalog, timeline mapping, and base session implementation are derived from Paseo 0.11.1's `plugins/antigravity-provider`, licensed under Apache-2.0. Changes add a separate provider identity, invocation-hook steering, and document editing. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 Third-party dependencies keep their own licenses. In particular, PyMuPDF is available under AGPL v3 or an Artifex commercial license; this repository's Apache-2.0 license does not replace those terms. See the [PyMuPDF licensing notice](https://pymupdf.readthedocs.io/en/latest/about.html#license-and-copyright) before redistribution or commercial integration. No third-party binaries, credentials, user documents, or local configuration files are included.
+
+
+## Gemini multi-account integration
+
+The same Antigravity Steering provider uses the `aswap` CLI to manage Gemini account slots A (slot 1) and B (slot 2) on Windows. It is a serial credential switch, not a new Paseo plugin or a combined Google subscription.
+
+Run once per Windows machine in the plugin repository:
+
+    powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-aswap.ps1
+
+This installs pinned antigravity-swap==0.3.0 into %LOCALAPPDATA%\paseo-antigravity-steering\aswap\.venv. The plugin locates that executable automatically, or uses aswap in PATH. PASEO_ASWAP_BIN can override the executable.
+
+Each device must separately authorize its Google accounts in Antigravity CLI and register them with aswap add. Account tokens are not stored in Git and must not be transferred between machines. Existing Antigravity processes may continue using the account they loaded on startup. Automatic switching is attempted only for recognized quota errors and does not repeat already-performed actions.
+
+To inspect the active account locally: execute aswap status. Keep %LOCALAPPDATA%\antigravity-swap and %USERPROFILE%\.gemini outside Git, cloud drives, and shared folders.
